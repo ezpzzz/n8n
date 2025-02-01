@@ -1,0 +1,122 @@
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: tcp://docker:2375
+  CI_REGISTRY: gitlab.sophosic.ai:5050
+  STAGING_N8N_HOST: staging.n8n.sophosic.ai
+  PROD_N8N_HOST: n8n.sophosic.ai
+
+services:
+  - docker:dind
+
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: docker:latest
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker tag $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA $CI_REGISTRY_IMAGE:latest
+    - docker push $CI_REGISTRY_IMAGE:latest
+  only:
+    - main
+
+deploy_staging:
+  stage: deploy
+  image: docker:latest
+  variables:
+    N8N_ENCRYPTION_KEY: ${STAGING_N8N_ENCRYPTION_KEY}
+    N8N_PORT: 5678
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: ${STAGING_DB_HOST}
+    DB_POSTGRESDB_DATABASE: ${STAGING_DB_NAME}
+    DB_POSTGRESDB_USER: ${STAGING_DB_USER}
+    DB_POSTGRESDB_PASSWORD: ${STAGING_DB_PASSWORD}
+    N8N_PROTOCOL: "https"
+    N8N_HOST: "staging.n8n.sophosic.ai"
+    WEBHOOK_URL: "https://staging.n8n.sophosic.ai"
+    GENERIC_TIMEZONE: "UTC"
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$STAGING_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+  script:
+    - ssh -o StrictHostKeyChecking=no ${STAGING_SSH_USER}@${STAGING_SSH_HOST} "
+      docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+      docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA &&
+      docker stop n8n-staging || true &&
+      docker rm n8n-staging || true &&
+      docker run -d --name n8n-staging
+      -p ${N8N_PORT}:5678
+      -v n8n_staging_data:/home/node/.n8n
+      -e N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      -e DB_TYPE=${DB_TYPE}
+      -e DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
+      -e DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
+      -e DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
+      -e DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      -e N8N_PROTOCOL=${N8N_PROTOCOL}
+      -e N8N_HOST=${N8N_HOST}
+      -e WEBHOOK_URL=${WEBHOOK_URL}
+      -e GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  only:
+    - main
+  environment:
+    name: staging
+    url: https://${STAGING_N8N_HOST}
+
+deploy_production:
+  stage: deploy
+  image: docker:latest
+  variables:
+    N8N_ENCRYPTION_KEY: ${PROD_N8N_ENCRYPTION_KEY}
+    N8N_PORT: 5678
+    DB_TYPE: postgresdb
+    DB_POSTGRESDB_HOST: ${PROD_DB_HOST}
+    DB_POSTGRESDB_DATABASE: ${PROD_DB_NAME}
+    DB_POSTGRESDB_USER: ${PROD_DB_USER}
+    DB_POSTGRESDB_PASSWORD: ${PROD_DB_PASSWORD}
+    N8N_PROTOCOL: "https"
+    N8N_HOST: "n8n.sophosic.ai"
+    WEBHOOK_URL: "https://n8n.sophosic.ai"
+    GENERIC_TIMEZONE: "UTC"
+  before_script:
+    - apk add --no-cache openssh-client
+    - eval $(ssh-agent -s)
+    - echo "$PROD_SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+  script:
+    - ssh -o StrictHostKeyChecking=no ${PROD_SSH_USER}@${PROD_SSH_HOST} "
+      docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY &&
+      docker pull $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA &&
+      docker stop n8n-production || true &&
+      docker rm n8n-production || true &&
+      docker run -d --name n8n-production
+      -p ${N8N_PORT}:5678
+      -v n8n_production_data:/home/node/.n8n
+      -e N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      -e DB_TYPE=${DB_TYPE}
+      -e DB_POSTGRESDB_HOST=${DB_POSTGRESDB_HOST}
+      -e DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE}
+      -e DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER}
+      -e DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      -e N8N_PROTOCOL=${N8N_PROTOCOL}
+      -e N8N_HOST=${N8N_HOST}
+      -e WEBHOOK_URL=${WEBHOOK_URL}
+      -e GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
+  only:
+    - main
+  when: manual
+  environment:
+    name: production
+    url: https://${PROD_N8N_HOST}
