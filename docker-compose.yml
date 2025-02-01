@@ -1,0 +1,20 @@
+version: '3'
+services:
+  n8n:
+    image: n8nio/n8n
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_HOSTNAME=n8n-env.sophosic.ai
+      - N8N_PROTOCOL=https
+      - N8N_HOSTNAME=n8n-env.sophosic.ai
+    volumes:
+      - ./n8n:/home/node/.n8n
+    command: >
+      sh -c "npm install && npm start"
+    depends_on:
+      - postgres
