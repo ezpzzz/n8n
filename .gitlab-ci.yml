@@ -3,8 +3,8 @@ variables:
   DOCKER_TLS_CERTDIR: ""
   DOCKER_HOST: tcp://docker:2375
   CI_REGISTRY: gitlab.sophosic.ai:5050
-  STAGING_N8N_HOST: staging.n8n.sophosic.ai
-  PROD_N8N_HOST: n8n.sophosic.ai
+  STAGING_N8N_HOST: staging.n8n-env.sophosic.ai
+  PROD_N8N_HOST: n8n-env.sophosic.ai
   BASE_ENV_NAME: n8n-base
 
 services:
@@ -42,8 +42,8 @@ deploy_staging:
     DB_POSTGRESDB_USER: ${STAGING_DB_USER}
     DB_POSTGRESDB_PASSWORD: ${STAGING_DB_PASSWORD}
     N8N_PROTOCOL: "https"
-    N8N_HOST: "staging.n8n.sophosic.ai"
-    WEBHOOK_URL: "https://staging.n8n.sophosic.ai"
+    N8N_HOST: "staging.n8n-env.sophosic.ai"
+    WEBHOOK_URL: "https://staging.n8n-env.sophosic.ai"
     GENERIC_TIMEZONE: "UTC"
   before_script:
     - apk add --no-cache openssh-client
@@ -89,8 +89,8 @@ deploy_production:
     DB_POSTGRESDB_USER: ${PROD_DB_USER}
     DB_POSTGRESDB_PASSWORD: ${PROD_DB_PASSWORD}
     N8N_PROTOCOL: "https"
-    N8N_HOST: "n8n.sophosic.ai"
-    WEBHOOK_URL: "https://n8n.sophosic.ai"
+    N8N_HOST: "n8n-env.sophosic.ai"
+    WEBHOOK_URL: "https://n8n-env.sophosic.ai"
     GENERIC_TIMEZONE: "UTC"
   before_script:
     - apk add --no-cache openssh-client
