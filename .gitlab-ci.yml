@@ -5,6 +5,7 @@ variables:
   CI_REGISTRY: gitlab.sophosic.ai:5050
   STAGING_N8N_HOST: staging.n8n.sophosic.ai
   PROD_N8N_HOST: n8n.sophosic.ai
+  BASE_ENV_NAME: n8n-base
 
 services:
   - docker:dind
@@ -29,6 +30,9 @@ build:
 deploy_staging:
   stage: deploy
   image: docker:latest
+  environment:
+    name: ${BASE_ENV_NAME}/staging
+    url: https://${STAGING_N8N_HOST}
   variables:
     N8N_ENCRYPTION_KEY: ${STAGING_N8N_ENCRYPTION_KEY}
     N8N_PORT: 5678
@@ -69,13 +73,13 @@ deploy_staging:
       $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA"
   only:
     - main
-  environment:
-    name: staging
-    url: https://${STAGING_N8N_HOST}
 
 deploy_production:
   stage: deploy
   image: docker:latest
+  environment:
+    name: ${BASE_ENV_NAME}/production
+    url: https://${PROD_N8N_HOST}
   variables:
     N8N_ENCRYPTION_KEY: ${PROD_N8N_ENCRYPTION_KEY}
     N8N_PORT: 5678
@@ -117,6 +121,3 @@ deploy_production:
   only:
     - main
   when: manual
-  environment:
-    name: production
-    url: https://${PROD_N8N_HOST}
