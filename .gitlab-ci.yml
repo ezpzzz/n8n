@@ -34,8 +34,6 @@ build:
     - docker push $DOCKER_IMAGE:$DOCKER_TAG
     - docker tag $DOCKER_IMAGE:$DOCKER_TAG $DOCKER_IMAGE:latest
     - docker push $DOCKER_IMAGE:latest
-  only:
-    - main
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_PIPELINE_SOURCE == "schedule"
@@ -68,8 +66,6 @@ deploy:
       -e N8N_PORT=$N8N_PORT
       -v n8n_data:/home/node/.n8n
       $DOCKER_IMAGE:$DOCKER_TAG"
-  only:
-    - main
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
     - if: $CI_PIPELINE_SOURCE == "schedule"
