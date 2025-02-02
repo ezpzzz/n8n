@@ -12,6 +12,16 @@ variables:
   N8N_PROTOCOL: "https"
   N8N_PORT: "5678"
 
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+    - when: never
+
 services:
   - name: docker:20.10.16-dind
     command: ["--tls=false"]
@@ -78,8 +88,3 @@ deploy:
     url: https://n8n-env.sophosic.ai
   tags:
     - docker
-
-workflow:
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_COMMIT_BRANCH == "master"
