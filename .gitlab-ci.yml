@@ -8,7 +8,7 @@ variables:
   N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
   N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
   N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-  N8N_HOST: "n8n.sophosic.ai"
+  N8N_HOST: "n8n-env.sophosic.ai"
   N8N_PROTOCOL: "https"
   N8N_PORT: "5678"
 
@@ -35,8 +35,10 @@ build:
     - docker tag $DOCKER_IMAGE:$DOCKER_TAG $DOCKER_IMAGE:latest
     - docker push $DOCKER_IMAGE:latest
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
     - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
   tags:
     - docker
 
@@ -67,16 +69,17 @@ deploy:
       -v n8n_data:/home/node/.n8n
       $DOCKER_IMAGE:$DOCKER_TAG"
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
     - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
   environment:
     name: production
-    url: https://n8n.sophosic.ai
+    url: https://n8n-env.sophosic.ai
   tags:
     - docker
 
-# Schedule pipeline to run every day at 2 AM UTC
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
