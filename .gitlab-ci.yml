@@ -26,9 +26,9 @@ build:
     - docker tag $DOCKER_IMAGE:$DOCKER_TAG $DOCKER_IMAGE:latest
     - docker push $DOCKER_IMAGE:latest
   only:
-    - main
+    - master
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
     - if: $CI_PIPELINE_SOURCE == "schedule"
   tags:
     - docker
@@ -60,9 +60,9 @@ deploy:
       -v n8n_data:/home/node/.n8n
       $DOCKER_IMAGE:$DOCKER_TAG"
   only:
-    - main
+    - master
   rules:
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
     - if: $CI_PIPELINE_SOURCE == "schedule"
   environment:
     name: production
@@ -74,4 +74,4 @@ deploy:
 workflow:
   rules:
     - if: $CI_PIPELINE_SOURCE == "schedule"
-    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $CI_COMMIT_BRANCH == "master"
