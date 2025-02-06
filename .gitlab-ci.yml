@@ -1,14 +1,87 @@
 variables:
-  DOCKER_REGISTRY: $CI_REGISTRY
-  DOCKER_IMAGE: $CI_REGISTRY_IMAGE
+  DOCKER_REGISTRY: "registry.sophosic.ai"
+  DOCKER_IMAGE: "registry.sophosic.ai/${CI_PROJECT_PATH}"
   DOCKER_TAG: $CI_COMMIT_SHA
+  # Add SUDO handling
+  SUDO_ASKPASS: "${CI_PROJECT_DIR}/askpass.sh"
+  GIT_SSL_NO_VERIFY: "true"
+  # Docker configuration - Disable TLS for dind communication
+  DOCKER_HOST: "tcp://docker:2375"
+  DOCKER_TLS_CERTDIR: ""  # Explicitly disable TLS
+  DOCKER_DRIVER: overlay2
+  DOCKER_BUILDKIT: 1
+  DOCKER_CLI_EXPERIMENTAL: enabled
+  FF_NETWORK_PER_BUILD: "true"
+  # Instance identifier (can be overridden in CI/CD variables)
+  N8N_INSTANCE_ID: "default"
+
+  # Instance-specific configurations
+  N8N_INSTANCES: |
+    default:
+      port: 9080
+      host: n8n.sophosic.ai
+      container: n8n
+      volume: n8n_data
+    instance1:
+      port: 9081
+      host: n8n-1.sophosic.ai
+      container: n8n-1
+      volume: n8n_data_1
+    instance2:
+      port: 9082
+      host: n8n-2.sophosic.ai
+      container: n8n-2
+      volume: n8n_data_2
+
+  # Base configuration (these can be overridden per instance)
   N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER}
   N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD}
   N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-  N8N_HOST: "n8n.sophosic.ai"
   N8N_PROTOCOL: "https"
   N8N_PORT: "443"
   WEBHOOK_URL: "https://api.sophosic.ai/"
+  # Database configuration
+  DB_TYPE: sqlite
+  DB_SQLITE_PATH: /home/node/.n8n/database.sqlite
+  # Execution settings
+  EXECUTIONS_MODE: regular
+  EXECUTIONS_TIMEOUT: 3600
+  EXECUTIONS_DATA_SAVE_ON_ERROR: all
+  EXECUTIONS_DATA_SAVE_ON_SUCCESS: all
+  EXECUTIONS_DATA_SAVE_ON_PROGRESS: true
+  EXECUTIONS_DATA_PRUNE: true
+  EXECUTIONS_DATA_MAX_AGE: 168
+  # Security settings
+  N8N_BASIC_AUTH_ACTIVE: true
+  N8N_DISABLE_PRODUCTION_MAIN_PROCESS: false
+  N8N_USER_FOLDER: /home/node/.n8n
+  N8N_DIAGNOSTICS_ENABLED: true
+  N8N_HIRING_BANNER_ENABLED: false
+  N8N_PERSONALIZATION_ENABLED: false
+  # Performance settings
+  N8N_PROCESS_TIMEOUT: 900
+  N8N_METRICS: false
+  # Deployment settings
+  NODE_ENV: production
+  N8N_PERSIST_DATA: true
+  N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN: true
+  # Logging
+  N8N_LOG_LEVEL: info
+  N8N_LOG_OUTPUT: console
+  # Docker configuration
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_BUILDKIT: 1
+  DOCKER_CLI_EXPERIMENTAL: enabled
+  FF_NETWORK_PER_BUILD: "true"
+  # DNS configuration
+  FF_NETWORK_PER_BUILD_GIT_STRATEGY: "fetch"
+  # Registry configuration - using deploy token
+  CI_REGISTRY: "registry.sophosic.ai"
+  CI_REGISTRY_IMAGE: "registry.sophosic.ai/${CI_PROJECT_PATH}"
+  CI_DEPLOY_USER: ${REGISTRY_DEPLOY_USER}
+  CI_DEPLOY_PASSWORD: ${REGISTRY_DEPLOY_TOKEN}
 
 workflow:
   rules:
@@ -21,25 +94,186 @@ workflow:
     - when: never
 
 services:
-  - name: docker:20.10.16-dind
-    command: ["--tls=false"]
+  - name: docker:24.0.5-dind
+    alias: docker
+    command:
+      - "--tls=false"
+      - "--insecure-registry=registry.sophosic.ai"
+      - "--host=tcp://0.0.0.0:2375"
 
 stages:
-  - build
+  - init
+  - setup
   - deploy
+  - verify
 
 build:
-  stage: build
-  image: docker:20.10.16
+  stage: init
+  image: docker:24.0.5
+  services:
+    - name: docker:24.0.5-dind
+      alias: docker
+      command:
+        - "--tls=false"
+        - "--insecure-registry=registry.sophosic.ai"
+        - "--host=tcp://0.0.0.0:2375"
   variables:
-    DOCKER_HOST: unix:///var/run/docker.sock
+    # Docker configuration
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""  # Explicitly disable TLS
+    DOCKER_DRIVER: overlay2
+    # Configure Docker buildx for better layer caching
+    DOCKER_BUILDKIT: 1
+    DOCKER_CLI_EXPERIMENTAL: enabled
+    BUILDX_PLATFORM: linux/amd64
+    # Add registry timeouts
+    DOCKER_CLIENT_TIMEOUT: "180"
+    DOCKER_REGISTRY_TIMEOUT: "180"
+    # Add Docker daemon connection retry settings
+    DOCKER_CONNECT_RETRIES: "60"
+    DOCKER_CONNECT_RETRY_INTERVAL: "2"
   before_script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - |
+      echo "Setting up build environment..."
+      # Install required packages
+      apk add --no-cache wget curl ca-certificates git
+
+      # Install yq
+      wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.40.5/yq_linux_amd64
+      chmod +x /usr/local/bin/yq
+
+      # Wait for Docker daemon with improved retry logic
+      echo "Waiting for Docker daemon..."
+      retries=${DOCKER_CONNECT_RETRIES}
+      interval=${DOCKER_CONNECT_RETRY_INTERVAL}
+      until docker info >/dev/null 2>&1; do
+        if [ "$retries" -le 0 ]; then
+          echo "❌ Docker daemon not available after ${DOCKER_CONNECT_RETRIES} attempts"
+          docker info
+          exit 1
+        fi
+        echo "Waiting... ($retries attempts remaining)"
+        retries=$((retries - 1))
+        sleep $interval
+      done
+      echo "✅ Docker daemon is ready"
+
+      # Set up registry SSL certificates
+      echo "Setting up registry certificates..."
+      mkdir -p /etc/docker/certs.d/registry.sophosic.ai
+      # Copy the certificate if it exists
+      if [ -f "/etc/gitlab/ssl/sophosic.ai.crt" ]; then
+        cp /etc/gitlab/ssl/sophosic.ai.crt /etc/docker/certs.d/registry.sophosic.ai/ca.crt
+      fi
+
+      # Configure Docker client for registry
+      echo "Configuring Docker client..."
+      mkdir -p $HOME/.docker
+      echo '{
+        "insecure-registries": ["registry.sophosic.ai"],
+        "max-concurrent-downloads": 1,
+        "max-concurrent-uploads": 1,
+        "experimental": "enabled"
+      }' > $HOME/.docker/config.json
+
+      # Login to registry first
+      echo "Authenticating with registry..."
+      max_attempts=5
+      attempt=1
+      while [ $attempt -le $max_attempts ]; do
+        echo "Login attempt $attempt of $max_attempts..."
+        if echo "$CI_DEPLOY_PASSWORD" | docker login -u "$CI_DEPLOY_USER" --password-stdin "$CI_REGISTRY"; then
+          echo "✅ Registry authentication successful"
+          break
+        fi
+        attempt=$((attempt + 1))
+        if [ $attempt -le $max_attempts ]; then
+          echo "⚠️ Login failed, retrying in 5 seconds..."
+          sleep 5
+        fi
+      done
+      if [ $attempt -gt $max_attempts ]; then
+        echo "❌ Failed to authenticate with registry after $max_attempts attempts"
+        exit 1
+      fi
+
+      # Test registry connectivity using Docker
+      echo "Testing registry connectivity..."
+      max_attempts=5
+      attempt=1
+      while [ $attempt -le $max_attempts ]; do
+        if docker version >/dev/null 2>&1 && docker pull $DOCKER_IMAGE:latest >/dev/null 2>&1 || [ $? -eq 1 ]; then
+          echo "✅ Registry is accessible (pull failed as expected for new image)"
+          break
+        fi
+        echo "⚠️ Registry connectivity test failed, attempt $attempt of $max_attempts"
+        attempt=$((attempt + 1))
+        if [ $attempt -le $max_attempts ]; then
+          sleep 5
+        fi
+      done
+      if [ $attempt -gt $max_attempts ]; then
+        echo "❌ Registry connectivity test failed after $max_attempts attempts"
+        exit 1
+      fi
   script:
-    - docker pull $DOCKER_IMAGE:latest || true
-    - docker build --cache-from $DOCKER_IMAGE:latest -t $DOCKER_IMAGE:$DOCKER_TAG -t $DOCKER_IMAGE:latest .
-    - docker push $DOCKER_IMAGE:$DOCKER_TAG
-    - docker push $DOCKER_IMAGE:latest
+    - |
+      echo "Extracting configuration values..."
+      export N8N_INSTANCE_PORT=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.port" -)
+      export N8N_HOST=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.host" -)
+      export CONTAINER_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.container" -)
+      export VOLUME_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.volume" -)
+
+      echo "Validating configuration values..."
+      if [ -z "$N8N_INSTANCE_PORT" ] || [ -z "$N8N_HOST" ] || [ -z "$CONTAINER_NAME" ] || [ -z "$VOLUME_NAME" ]; then
+        echo "❌ Missing required configuration values"
+        echo "  Port: $N8N_INSTANCE_PORT"
+        echo "  Host: $N8N_HOST"
+        echo "  Container: $CONTAINER_NAME"
+        echo "  Volume: $VOLUME_NAME"
+        exit 1
+      fi
+      echo "✅ Configuration values validated"
+
+      echo "Building for instance ${N8N_INSTANCE_ID}..."
+      echo "  Port: ${N8N_INSTANCE_PORT}"
+      echo "  Host: ${N8N_HOST}"
+      echo "  Container: ${CONTAINER_NAME}"
+      echo "  Volume: ${VOLUME_NAME}"
+
+      echo "Pulling latest image for cache..."
+      if ! docker pull $DOCKER_IMAGE:latest; then
+        echo "⚠️ Failed to pull latest image, continuing with build..."
+      fi
+
+      echo "Building with optimizations..."
+      if ! docker buildx build \
+        --push \
+        --cache-from $DOCKER_IMAGE:latest \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --platform linux/amd64 \
+        -t $DOCKER_IMAGE:$DOCKER_TAG \
+        -t $DOCKER_IMAGE:latest \
+        .; then
+
+        echo "⚠️ Buildx failed, attempting traditional build..."
+        if ! docker build \
+          --cache-from $DOCKER_IMAGE:latest \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          -t $DOCKER_IMAGE:$DOCKER_TAG \
+          -t $DOCKER_IMAGE:latest \
+          .; then
+          echo "❌ Build failed"
+          exit 1
+        fi
+
+        echo "Pushing images..."
+        if ! docker push $DOCKER_IMAGE:$DOCKER_TAG || ! docker push $DOCKER_IMAGE:latest; then
+          echo "❌ Failed to push images"
+          exit 1
+        fi
+      fi
+      echo "✅ Build completed successfully"
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
       when: always
@@ -48,37 +282,611 @@ build:
   tags:
     - docker
 
-deploy:
-  stage: deploy
+dns_config:
+  stage: init
   before_script:
-    - docker info || (echo "Docker not available on host" && exit 1)
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-  script:
-    - docker pull $DOCKER_IMAGE:$DOCKER_TAG
-    - docker stop n8n || true
-    - docker rm n8n || true
     - |
-      docker run -d --name n8n \
-        --restart unless-stopped \
-        -p 9080:9080 \
-        -e N8N_BASIC_AUTH_ACTIVE=true \
-        -e N8N_BASIC_AUTH_USER='$N8N_BASIC_AUTH_USER' \
-        -e N8N_BASIC_AUTH_PASSWORD='$N8N_BASIC_AUTH_PASSWORD' \
-        -e N8N_ENCRYPTION_KEY='$N8N_ENCRYPTION_KEY' \
-        -e N8N_HOST='$N8N_HOST' \
-        -e N8N_PROTOCOL='$N8N_PROTOCOL' \
-        -e N8N_PORT='$N8N_PORT' \
-        -e WEBHOOK_URL='$WEBHOOK_URL' \
-        -v n8n_data:/home/node/.n8n \
-        $DOCKER_IMAGE:$DOCKER_TAG
-    - docker ps | grep n8n || exit 1
+      # Create askpass script
+      echo '#!/bin/bash' > /tmp/askpass.sh
+      echo "echo \"$SUDO_PASSWORD\"" >> /tmp/askpass.sh
+      chmod +x /tmp/askpass.sh
+
+      # Install required packages
+      sudo apt-get update
+      sudo apt-get install -y jq dnsutils curl
+
+      # Install yq
+      YQ_VERSION="v4.40.5"
+      sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+      sudo chmod +x /usr/local/bin/yq
+
+      # Verify yq installation
+      yq --version || exit 1
+  script:
+    - |
+      # Extract host from N8N_INSTANCES configuration
+      if [ -z "$N8N_INSTANCES" ]; then
+        echo "ERROR: N8N_INSTANCES variable is not set"
+        exit 1
+      fi
+
+      export N8N_HOST=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.host" -)
+      if [ -z "$N8N_HOST" ]; then
+        echo "ERROR: Could not extract host from N8N_INSTANCES configuration"
+        echo "N8N_INSTANCE_ID: ${N8N_INSTANCE_ID}"
+        echo "N8N_INSTANCES:"
+        echo "$N8N_INSTANCES"
+        exit 1
+      fi
+
+      # Use the actual host value from configuration
+      DNS_RECORD="${N8N_HOST}"
+      echo "Configuring DNS for: ${DNS_RECORD}"
+
+      # Verify required environment variables
+      if [ -z "$CF_ZONE_ID" ] || [ -z "$CF_API_TOKEN" ]; then
+        echo "ERROR: Required environment variables CF_ZONE_ID and/or CF_API_TOKEN are not set"
+        exit 1
+      fi
+
+      # Get existing DNS record ID if it exists
+      echo "Checking for existing DNS record..."
+      RECORD_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?name=${DNS_RECORD}" \
+        -H "Authorization: Bearer ${CF_API_TOKEN}" \
+        -H "Content-Type: application/json" | jq -r '.result[0].id')
+
+      if [ "$RECORD_ID" != "null" ] && [ ! -z "$RECORD_ID" ]; then
+        echo "Updating existing DNS record: ${RECORD_ID}"
+        RESPONSE=$(curl -s -X PUT "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${RECORD_ID}" \
+          -H "Authorization: Bearer ${CF_API_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data '{
+            "type": "A",
+            "name": "'${DNS_RECORD}'",
+            "content": "149.28.250.246",
+            "proxied": false
+          }')
+      else
+        echo "Creating new DNS record"
+        RESPONSE=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
+          -H "Authorization: Bearer ${CF_API_TOKEN}" \
+          -H "Content-Type: application/json" \
+          --data '{
+            "type": "A",
+            "name": "'${DNS_RECORD}'",
+            "content": "149.28.250.246",
+            "proxied": false
+          }')
+      fi
+
+      # Check if the API call was successful
+      if ! echo "$RESPONSE" | jq -e '.success' > /dev/null; then
+        echo "ERROR: DNS update failed"
+        echo "Response:"
+        echo "$RESPONSE" | jq .
+        exit 1
+      fi
+
+      # Verify DNS record
+      echo "Verifying DNS record..."
+      MAX_ATTEMPTS=10
+      ATTEMPT=1
+      while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+        echo "DNS verification attempt $ATTEMPT of $MAX_ATTEMPTS"
+        if dig @1.1.1.1 ${DNS_RECORD} +short | grep -q "149.28.250.246"; then
+          echo "DNS record verified successfully"
+          exit 0
+        fi
+        echo "Waiting for DNS propagation..."
+        ATTEMPT=$((ATTEMPT + 1))
+        sleep 30
+      done
+      echo "DNS verification failed after $MAX_ATTEMPTS attempts"
+      exit 1
   rules:
     - if: $CI_COMMIT_BRANCH == "master"
       when: always
     - if: $CI_PIPELINE_SOURCE == "schedule"
       when: always
-  environment:
-    name: production
-    url: https://n8n.sophosic.ai
+  tags:
+    - shell
+
+env_setup:
+  stage: setup
+  needs: [build]
+  before_script:
+    - docker info || (echo "Docker not available on host" && exit 1)
+    - which yq || (wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.40.5/yq_linux_amd64 && chmod +x /usr/local/bin/yq)
+  script:
+    - |
+      # Extract values individually to avoid parsing issues
+      export N8N_INSTANCE_PORT=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.port" -)
+      export N8N_HOST=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.host" -)
+      export CONTAINER_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.container" -)
+      export VOLUME_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.volume" -)
+
+      # Validate required values
+      if [ -z "$N8N_INSTANCE_PORT" ] || [ -z "$N8N_HOST" ] || [ -z "$CONTAINER_NAME" ] || [ -z "$VOLUME_NAME" ]; then
+        echo "Error: Missing required configuration values for instance ${N8N_INSTANCE_ID}"
+        exit 1
+      fi
+
+      # Create Docker volumes if they don't exist
+      docker volume create ${VOLUME_NAME} || true
+      docker volume create ${VOLUME_NAME}_workflows || true
+      docker volume create ${VOLUME_NAME}_credentials || true
+
+      # Initialize volume permissions
+      docker run --rm \
+        -v ${VOLUME_NAME}:/data \
+        -v ${VOLUME_NAME}_workflows:/workflows \
+        -v ${VOLUME_NAME}_credentials:/credentials \
+        alpine sh -c "mkdir -p /data/.n8n /workflows /credentials && chown -R 1000:1000 /data /workflows /credentials && chmod -R 770 /data /workflows /credentials"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
   tags:
     - docker
+
+ssl_setup:
+  stage: setup
+  needs: [dns_config]
+  script:
+    - |
+      # Create required directories
+      sudo -n mkdir -p /etc/gitlab/ssl/cloudflare
+
+      # Check if certificates exist
+      if [ ! -f "/etc/gitlab/ssl/cloudflare/cert.pem" ] || \
+         [ ! -f "/etc/gitlab/ssl/cloudflare/chain.pem" ] || \
+         [ ! -f "/etc/gitlab/ssl/cloudflare/key.pem" ]; then
+        echo "❌ Missing required Cloudflare SSL certificates"
+        echo "Please ensure the following files exist:"
+        echo "  - /etc/gitlab/ssl/cloudflare/cert.pem"
+        echo "  - /etc/gitlab/ssl/cloudflare/chain.pem"
+        echo "  - /etc/gitlab/ssl/cloudflare/key.pem"
+        exit 1
+      fi
+
+      # Verify certificate validity
+      CERT_EXPIRY=$(openssl x509 -enddate -noout -in "/etc/gitlab/ssl/cloudflare/cert.pem" | cut -d= -f2)
+      EXPIRY_DATE=$(date -d "${CERT_EXPIRY}" +%s)
+      CURRENT_DATE=$(date +%s)
+      DAYS_REMAINING=$(( ($EXPIRY_DATE - $CURRENT_DATE) / 86400 ))
+
+      echo "Certificate valid for $DAYS_REMAINING days"
+      if [ $DAYS_REMAINING -lt 30 ]; then
+        echo "⚠️ Warning: Certificate will expire in less than 30 days"
+        echo "Please update Cloudflare SSL certificates"
+      fi
+
+      # Verify certificate is for correct domain
+      if ! openssl x509 -noout -text -in /etc/gitlab/ssl/cloudflare/cert.pem | grep -q "DNS:*.sophosic.ai"; then
+        echo "❌ Certificate validation failed - missing wildcard domain"
+        exit 1
+      fi
+
+      # Set proper permissions
+      sudo -n chown root:root /etc/gitlab/ssl/cloudflare/*
+      sudo -n chmod 644 /etc/gitlab/ssl/cloudflare/cert.pem /etc/gitlab/ssl/cloudflare/chain.pem
+      sudo -n chmod 600 /etc/gitlab/ssl/cloudflare/key.pem
+
+      # Reload nginx to ensure it's using the current certificates
+      sudo -n gitlab-ctl restart nginx
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+  tags:
+    - shell
+
+deploy_service:
+  stage: deploy
+  needs: [env_setup]
+  before_script:
+    - |
+      echo "Setting up Docker registry certificates..."
+
+      # Check Docker service status
+      echo "Checking Docker service status..."
+      if ! sudo systemctl status docker > /dev/null; then
+        echo "Docker service is not running. Attempting to start..."
+        sudo systemctl start docker
+        sleep 5
+      fi
+
+      # Create directory for registry certificates
+      sudo mkdir -p /etc/docker/certs.d/registry.sophosic.ai
+
+      # Copy the certificate
+      sudo cp /etc/gitlab/ssl/sophosic.ai.crt /etc/docker/certs.d/registry.sophosic.ai/ca.crt
+
+      # Update Docker daemon configuration
+      echo "Updating Docker daemon configuration..."
+      echo '{
+        "insecure-registries": ["registry.sophosic.ai"],
+        "log-level": "error",
+        "max-concurrent-downloads": 1,
+        "max-concurrent-uploads": 1
+      }' | sudo tee /etc/docker/daemon.json
+
+      # Reload Docker daemon configuration without restart
+      echo "Reloading Docker daemon configuration..."
+      sudo systemctl daemon-reload
+      if ! sudo kill -SIGHUP $(pidof dockerd); then
+        echo "Failed to reload Docker daemon, attempting restart..."
+        sudo systemctl restart docker
+        sleep 5
+      fi
+
+      # Wait for Docker to be ready
+      echo "Waiting for Docker daemon to be ready..."
+      timeout=30
+      while ! sudo docker info >/dev/null 2>&1; do
+        sleep 1
+        timeout=$((timeout - 1))
+        if [ $timeout -le 0 ]; then
+          echo "❌ Timeout waiting for Docker daemon"
+          echo "Docker service status:"
+          sudo systemctl status docker
+          echo "Docker daemon logs:"
+          sudo journalctl -u docker --no-pager | tail -n 50
+          exit 1
+        fi
+        echo "Waiting... ($timeout seconds remaining)"
+      done
+      echo "✅ Docker daemon is ready"
+
+      # Login to registry
+      echo "Logging into registry..."
+      echo "$CI_DEPLOY_PASSWORD" | sudo docker login -u "$CI_DEPLOY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - |
+      # Extract configuration values
+      export N8N_INSTANCE_PORT=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.port" -)
+      export N8N_HOST=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.host" -)
+      export CONTAINER_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.container" -)
+      export VOLUME_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.volume" -)
+
+      echo "Creating/updating Docker container..."
+      # Pull the latest image first
+      echo "Pulling latest image..."
+      if ! sudo docker pull ${DOCKER_IMAGE}:latest; then
+        echo "❌ Failed to pull image"
+        echo "Docker pull error details:"
+        sudo docker pull ${DOCKER_IMAGE}:latest 2>&1
+        exit 1
+      fi
+      echo "✅ Image pulled successfully"
+
+      # Stop and remove existing container if it exists
+      sudo docker stop ${CONTAINER_NAME} 2>/dev/null || true
+      sudo docker rm ${CONTAINER_NAME} 2>/dev/null || true
+
+      echo "Creating new container..."
+      # Create and start the container
+      sudo docker create \
+        --name ${CONTAINER_NAME} \
+        --restart unless-stopped \
+        -p ${N8N_INSTANCE_PORT}:5678 \
+        -v ${VOLUME_NAME}:/home/node/.n8n \
+        -v ${VOLUME_NAME}_workflows:/home/node/.n8n/workflows \
+        -v ${VOLUME_NAME}_credentials:/home/node/.n8n/credentials \
+        -e N8N_HOST="${N8N_HOST}" \
+        -e N8N_PORT="5678" \
+        -e N8N_PROTOCOL="https" \
+        -e NODE_ENV="production" \
+        -e N8N_BASIC_AUTH_ACTIVE="${N8N_BASIC_AUTH_ACTIVE}" \
+        -e N8N_BASIC_AUTH_USER="${N8N_BASIC_AUTH_USER}" \
+        -e N8N_BASIC_AUTH_PASSWORD="${N8N_BASIC_AUTH_PASSWORD}" \
+        -e N8N_ENCRYPTION_KEY="${N8N_ENCRYPTION_KEY}" \
+        -e WEBHOOK_URL="${WEBHOOK_URL}" \
+        -e DB_TYPE="${DB_TYPE}" \
+        -e DB_SQLITE_PATH="${DB_SQLITE_PATH}" \
+        -e EXECUTIONS_MODE="${EXECUTIONS_MODE}" \
+        -e EXECUTIONS_TIMEOUT="${EXECUTIONS_TIMEOUT}" \
+        -e EXECUTIONS_DATA_SAVE_ON_ERROR="${EXECUTIONS_DATA_SAVE_ON_ERROR}" \
+        -e EXECUTIONS_DATA_SAVE_ON_SUCCESS="${EXECUTIONS_DATA_SAVE_ON_SUCCESS}" \
+        -e EXECUTIONS_DATA_SAVE_ON_PROGRESS="${EXECUTIONS_DATA_SAVE_ON_PROGRESS}" \
+        -e EXECUTIONS_DATA_PRUNE="${EXECUTIONS_DATA_PRUNE}" \
+        -e EXECUTIONS_DATA_MAX_AGE="${EXECUTIONS_DATA_MAX_AGE}" \
+        -e N8N_METRICS="${N8N_METRICS}" \
+        -e N8N_DIAGNOSTICS_ENABLED="${N8N_DIAGNOSTICS_ENABLED}" \
+        -e N8N_HIRING_BANNER_ENABLED="${N8N_HIRING_BANNER_ENABLED}" \
+        -e N8N_PERSONALIZATION_ENABLED="${N8N_PERSONALIZATION_ENABLED}" \
+        -e N8N_DISABLE_PRODUCTION_MAIN_PROCESS="${N8N_DISABLE_PRODUCTION_MAIN_PROCESS}" \
+        ${DOCKER_IMAGE}:latest
+
+      echo "Starting container..."
+      sudo docker start ${CONTAINER_NAME}
+
+      # Verify container is running
+      if ! sudo docker ps | grep -q ${CONTAINER_NAME}; then
+        echo "❌ Failed to start container"
+        echo "Container logs:"
+        sudo docker logs ${CONTAINER_NAME}
+        exit 1
+      fi
+      echo "✅ Container started successfully"
+
+      # Create systemd service file
+      echo "Creating systemd service..."
+      echo "[Unit]
+      Description=n8n workflow automation - Instance ${N8N_INSTANCE_ID}
+      After=docker.service
+      Requires=docker.service
+
+      [Service]
+      Type=simple
+      Restart=always
+      RestartSec=10
+      WorkingDirectory=/etc/gitlab
+      ExecStart=/usr/bin/docker start -a ${CONTAINER_NAME}
+      ExecStop=/usr/bin/docker stop ${CONTAINER_NAME}
+      TimeoutStartSec=120
+      TimeoutStopSec=60
+
+      [Install]
+      WantedBy=multi-user.target" | sudo -n tee /etc/systemd/system/n8n-${N8N_INSTANCE_ID}.service > /dev/null
+
+      # Set permissions and enable service
+      echo "Configuring systemd service..."
+      sudo -n chmod 644 /etc/systemd/system/n8n-${N8N_INSTANCE_ID}.service
+      sudo -n systemctl daemon-reload
+      sudo -n systemctl enable n8n-${N8N_INSTANCE_ID}.service
+      echo "✅ Service configured successfully"
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+  tags:
+    - shell
+
+deploy_nginx:
+  stage: deploy
+  needs: [ssl_setup]
+  script:
+    - |
+      echo -e "\e[34m➜ Extracting configuration values\e[0m"
+      export N8N_INSTANCE_PORT=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.port" -)
+      export N8N_HOST=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.host" -)
+
+      echo -e "\e[34m➜ Creating nginx configuration directory\e[0m"
+      sudo -n mkdir -p /etc/gitlab/nginx/conf.d
+
+      # Check if n8n.conf exists
+      if [ -f "/etc/gitlab/nginx/conf.d/n8n.conf" ]; then
+        echo -e "\e[32m✔ Found existing n8n.conf, skipping nginx configuration\e[0m"
+      else
+        echo -e "\e[34m➜ No existing n8n.conf found, creating new configuration\e[0m"
+
+        echo -e "\e[34m➜ Creating n8n nginx configuration\e[0m"
+        echo "# ${N8N_HOST} HTTP configuration
+        server {
+            listen *:80;
+            server_name ${N8N_HOST};
+            return 301 https://\$server_name\$request_uri;
+        }
+
+        # ${N8N_HOST} HTTPS configuration
+        server {
+            listen *:443 ssl;
+            server_name ${N8N_HOST};
+
+            # SSL configuration
+            ssl_certificate /etc/gitlab/ssl/cloudflare/cert.pem;
+            ssl_certificate_key /etc/gitlab/ssl/cloudflare/key.pem;
+            ssl_trusted_certificate /etc/gitlab/ssl/cloudflare/chain.pem;
+            ssl_protocols TLSv1.2 TLSv1.3;
+            ssl_prefer_server_ciphers off;
+            ssl_session_timeout 1d;
+            ssl_session_cache shared:SSL:50m;
+            ssl_session_tickets off;
+            ssl_stapling on;
+            ssl_stapling_verify on;
+            resolver 1.1.1.1 1.0.0.1 valid=300s;
+            resolver_timeout 5s;
+
+            location / {
+                proxy_pass http://127.0.0.1:${N8N_INSTANCE_PORT};
+                proxy_http_version 1.1;
+                proxy_set_header Host \$host;
+                proxy_set_header X-Real-IP \$remote_addr;
+                proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto \$scheme;
+                proxy_set_header Upgrade \$http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_cache_bypass \$http_upgrade;
+                proxy_buffering off;
+                proxy_read_timeout 120s;
+                proxy_send_timeout 120s;
+            }
+        }" | sudo -n tee /etc/gitlab/nginx/conf.d/n8n.conf > /dev/null
+
+        echo -e "\e[34m➜ Setting proper permissions\e[0m"
+        sudo -n chown -R root:root /etc/gitlab/nginx/conf.d/
+        sudo -n chmod 644 /etc/gitlab/nginx/conf.d/n8n.conf
+        sudo -n chmod 755 /etc/gitlab/nginx/conf.d
+      fi
+
+      # Clean up any default or duplicate configurations
+      echo -e "\e[34m➜ Cleaning up any default or duplicate configurations\e[0m"
+      sudo -n rm -f /etc/gitlab/nginx/conf.d/n8n-*-http.conf /etc/gitlab/nginx/conf.d/n8n-*-https.conf
+
+      echo -e "\e[34m➜ Reconfiguring GitLab\e[0m"
+      if ! sudo -n gitlab-ctl reconfigure; then
+        echo -e "\e[31m✖ GitLab reconfiguration failed\e[0m"
+        exit 1
+      fi
+      echo -e "\e[32m✔ GitLab reconfiguration successful\e[0m"
+
+      echo -e "\e[34m➜ Restarting nginx\e[0m"
+      if ! sudo -n gitlab-ctl restart nginx; then
+        echo -e "\e[31m✖ Failed to restart nginx\e[0m"
+        exit 1
+      fi
+      echo -e "\e[32m✔ Nginx restarted successfully\e[0m"
+
+      echo -e "\e[34m➜ Verifying nginx configuration\e[0m"
+      if sudo -n nginx -t; then
+        echo -e "\e[32m✔ Nginx configuration verified successfully\e[0m"
+      else
+        echo -e "\e[31m✖ Nginx configuration verification failed\e[0m"
+        exit 1
+      fi
+
+      echo -e "\e[34m➜ Testing configuration\e[0m"
+      if curl -k -I https://${N8N_HOST} &>/dev/null; then
+        echo -e "\e[32m✔ Service is accessible\e[0m"
+      else
+        echo -e "\e[33m⚠ Warning: Unable to verify service accessibility\e[0m"
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+  tags:
+    - shell
+
+verify:
+  stage: verify
+  needs: [deploy_service, deploy_nginx]
+  script:
+    - |
+      echo "Installing required packages..."
+      sudo apt-get update
+      sudo apt-get install -y wget net-tools curl jq
+
+      echo "Installing yq..."
+      YQ_VERSION="v4.40.5"
+      sudo wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64"
+      sudo chmod +x /usr/local/bin/yq
+
+      # Verify yq installation
+      if ! yq --version; then
+        echo "❌ Failed to install yq"
+        exit 1
+      fi
+      echo "✅ yq installed successfully"
+
+      echo "Extracting configuration values..."
+      # Debug: Print N8N_INSTANCES content
+      echo "N8N_INSTANCES content:"
+      echo "$N8N_INSTANCES"
+
+      # Extract values with error checking
+      N8N_INSTANCE_PORT=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.port" -)
+      if [ -z "$N8N_INSTANCE_PORT" ]; then
+        echo "❌ Failed to extract N8N_INSTANCE_PORT"
+        exit 1
+      fi
+      echo "✅ N8N_INSTANCE_PORT: $N8N_INSTANCE_PORT"
+
+      N8N_HOST=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.host" -)
+      if [ -z "$N8N_HOST" ]; then
+        echo "❌ Failed to extract N8N_HOST"
+        exit 1
+      fi
+      echo "✅ N8N_HOST: $N8N_HOST"
+
+      CONTAINER_NAME=$(echo "$N8N_INSTANCES" | yq e ".${N8N_INSTANCE_ID}.container" -)
+      if [ -z "$CONTAINER_NAME" ]; then
+        echo "❌ Failed to extract CONTAINER_NAME"
+        exit 1
+      fi
+      echo "✅ CONTAINER_NAME: $CONTAINER_NAME"
+
+      echo "Verifying Docker container..."
+      if ! sudo docker ps | grep ${CONTAINER_NAME}; then
+        echo "❌ Container ${CONTAINER_NAME} is not running"
+        echo "Docker ps output:"
+        sudo docker ps
+        exit 1
+      fi
+      echo "✅ Container is running"
+
+      echo "Checking container logs..."
+      sudo docker logs ${CONTAINER_NAME} || true
+
+      echo "Checking service status..."
+      if ! sudo systemctl start n8n-${N8N_INSTANCE_ID}.service; then
+        echo "⚠️ Failed to start service, checking status..."
+        sudo systemctl status n8n-${N8N_INSTANCE_ID}.service || true
+      fi
+
+      echo "Verifying port..."
+      if ! sudo netstat -tulpn | grep ${N8N_INSTANCE_PORT}; then
+        echo "❌ Port ${N8N_INSTANCE_PORT} is not listening"
+        echo "Netstat output:"
+        sudo netstat -tulpn
+        exit 1
+      fi
+      echo "✅ Port is listening"
+
+      echo "Testing HTTP to HTTPS redirect..."
+      REDIRECT=$(curl -sI "http://${N8N_HOST}" | grep -i "location:" || true)
+      if [[ "$REDIRECT" == *"https://${N8N_HOST}"* ]]; then
+        echo "✅ HTTP to HTTPS redirect working"
+      else
+        echo "⚠️ HTTP to HTTPS redirect not working as expected"
+        echo "Curl output:"
+        curl -sI "http://${N8N_HOST}"
+        # Give nginx a moment to reload configurations
+        echo "Waiting for nginx to reload configurations..."
+        sleep 10
+        echo "Retrying redirect test..."
+        REDIRECT=$(curl -sI "http://${N8N_HOST}" | grep -i "location:" || true)
+        if [[ "$REDIRECT" == *"https://${N8N_HOST}"* ]]; then
+          echo "✅ HTTP to HTTPS redirect working after retry"
+        else
+          echo "❌ HTTP to HTTPS redirect still not working"
+          echo "Checking nginx configuration..."
+          sudo nginx -t
+          echo "Nginx configuration for ${N8N_HOST}:"
+          sudo cat /etc/gitlab/nginx/conf.d/n8n.conf
+          exit 1
+        fi
+      fi
+
+      echo "Testing HTTPS access..."
+      echo "Checking DNS resolution..."
+      host ${N8N_HOST} || true
+
+      echo "Testing HTTPS connection with verbose output..."
+      if ! curl -v -k -sS "https://${N8N_HOST}" > /tmp/curl_response 2>&1; then
+        echo "❌ HTTPS connection failed"
+        echo "Curl debug output:"
+        cat /tmp/curl_response
+        echo "Checking nginx error logs..."
+        sudo tail -n 50 /var/log/gitlab/nginx/error.log || true
+        echo "Checking SSL certificate..."
+        echo | openssl s_client -connect ${N8N_HOST}:443 -servername ${N8N_HOST} 2>/dev/null || true
+        exit 1
+      fi
+
+      RESPONSE=$(cat /tmp/curl_response)
+      if [[ "$RESPONSE" == *"n8n"* ]] || [[ "$RESPONSE" == *"Workflow Automation"* ]]; then
+        echo "✅ HTTPS access working and n8n content detected"
+      else
+        echo "❌ HTTPS access working but unexpected content"
+        echo "Response content:"
+        echo "$RESPONSE"
+        exit 1
+      fi
+
+      echo "🎉 All verification steps completed successfully! You can now access the service at https://${N8N_HOST}"
+  environment:
+    name: production-${N8N_INSTANCE_ID}
+    url: https://${N8N_HOST}
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+  tags:
+    - shell
